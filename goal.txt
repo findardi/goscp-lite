@@ -1,0 +1,5 @@
+download:
+goscp download -h=host -p=port src dest
+
+upload
+goscp upload -h=host -p=port src dest
