@@ -12,7 +12,7 @@ var testCmd = &cobra.Command{
 	Long:    "Test SSH and SFTP connection to remote server",
 	Args:    cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		internal.Test(user, host, port, keypath)
+		internal.Test(user, host, keypath, port)
 	},
 }
 

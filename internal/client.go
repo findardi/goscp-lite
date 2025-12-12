@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/pkg/sftp"
@@ -28,7 +29,11 @@ func NewClient(serverAddr string, sshCfg *ssh.ClientConfig) (*Client, error) {
 	}
 
 	// create sftp session
-	sftpClient, err := sftp.NewClient(sshClient)
+	sftpClient, err := sftp.NewClient(
+		sshClient,
+		sftp.MaxPacket(32*1024),
+		sftp.MaxConcurrentRequestsPerFile(64),
+	)
 	if err != nil {
 		sshClient.Close()
 		return nil, fmt.Errorf("sftp session failed: %w", err)
@@ -73,4 +78,42 @@ func addDefaultPort(addr string) (string, error) {
 	}
 
 	return addr, nil
+}
+
+func Initiate(user, host, keyPath string, port int) (string, *ssh.ClientConfig) {
+	if user == "" {
+		user = "root"
+	}
+
+	if port == 0 {
+		port = 22
+	}
+
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
+
+	var (
+		sshCfg *ssh.ClientConfig
+		err    error
+	)
+
+	if keyPath != "" {
+		keyData, err := os.ReadFile(keyPath)
+		if err != nil {
+			fmt.Printf("✗ Failed to read key: %v\n", err)
+			os.Exit(1)
+		}
+		sshCfg, err = NewSSHCfgPrivateKey(user, keyData)
+		if err != nil {
+			fmt.Printf("✗ Failed to create SSH config: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		sshCfg, err = NewSSHCfgWithAllKeys(user)
+		if err != nil {
+			fmt.Printf("✗ %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	return serverAddr, sshCfg
 }
