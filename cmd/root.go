@@ -16,8 +16,8 @@ var (
 
 var rootCmd = &cobra.Command{
 	Use:   "goscp",
-	Short: "goscp is a cli tool for scp operation.",
-	Long:  "goscp is a cli tool for scp operation powered by go.",
+	Short: "A lightweight SCP/SFTP CLI tool",
+	Long:  "goscp is a lightweight command-line tool for secure file transfers\nusing SFTP protocols, powered by Go with SSH key authentication.",
 	Run:   func(cmd *cobra.Command, args []string) {},
 }
 

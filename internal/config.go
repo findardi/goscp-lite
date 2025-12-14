@@ -24,10 +24,6 @@ func NewSSHCfgPrivateKey(username string, privPem []byte, passphrase ...string) 
 		return
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
 	cfg = &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{

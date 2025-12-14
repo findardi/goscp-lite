@@ -4,23 +4,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
 func testConn(serverAddr string, sshCfg *ssh.ClientConfig) error {
-	sshClient, err := dialServer(serverAddr, sshCfg)
+	sshClient, err := NewClient(serverAddr, sshCfg)
 	if err != nil {
 		return fmt.Errorf("ssh dial failed: %w", err)
 	}
 	defer sshClient.Close()
-
-	sftpClient, err := sftp.NewClient(sshClient)
-	if err != nil {
-		return fmt.Errorf("sftp session failed: %w", err)
-	}
-	defer sftpClient.Close()
-
 	return nil
 }
 

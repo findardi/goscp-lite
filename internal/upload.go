@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -13,7 +14,86 @@ import (
 
 const (
 	MAX_FILE_SIZE = 100 * 1024 * 1024
+	PACKET_SIZE   = 32 * 1024
 )
+
+type Uploader struct {
+	client     *sftp.Client
+	workes     int
+	bufferSize int
+}
+
+func NewUploader(c *sftp.Client) Uploader {
+	return Uploader{
+		client:     c,
+		workes:     autoWorker(),
+		bufferSize: PACKET_SIZE,
+	}
+}
+
+func autoWorker() int {
+	return 8
+}
+
+func (u *Uploader) UploadFile(localPath, remotePath string, progress func(int)) error {
+	local, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer local.Close()
+
+	remote, err := u.client.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	defer remote.Close()
+
+	type chunk struct {
+		data []byte
+		n    int
+	}
+
+	ch := make(chan chunk, u.workes)
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < u.workes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range ch {
+				_, _ = remote.Write(c.data[:c.n])
+				if progress != nil {
+					progress(c.n)
+				}
+			}
+		}()
+	}
+
+	buf := make([]byte, u.bufferSize)
+	for {
+		n, err := local.Read(buf)
+		if n > 0 {
+			tmp := make([]byte, n)
+			copy(tmp, buf[:n])
+			ch <- chunk{
+				data: tmp,
+				n:    n,
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			close(ch)
+			wg.Wait()
+			return err
+		}
+	}
+
+	close(ch)
+	wg.Wait()
+	return nil
+}
 
 func Upload(user, host string, port int, keypath, localPath, remotePath string) {
 	serverAddr, sshCfg := Initiate(user, host, keypath, port)
@@ -33,11 +113,9 @@ func Upload(user, host string, port int, keypath, localPath, remotePath string) 
 
 	if dataInfo.IsDir() {
 		// directory handle
-		fmt.Printf("hit this upload dir\n")
 		err = uploadDir(client.SFTP(), localPath, remotePath)
 	} else {
 		// file handle
-		fmt.Printf("hit this upload file\n")
 		remoteInfo, statErr := client.SFTP().Stat(remotePath)
 		if statErr == nil && remoteInfo.IsDir() {
 			remotePath = filepath.ToSlash(filepath.Join(remotePath, filepath.Base(localPath)))
@@ -63,11 +141,6 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("cannot stat local file: %w", err)
 	}
-
-	// if fileInfo.Size() > MAX_FILE_SIZE {
-	// 	// do something goroutine
-
-	// }
 
 	remoteFile, err := sftpClient.Create(remotePath)
 	if err != nil {
@@ -96,41 +169,34 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 		}),
 	)
 
-	buf := make([]byte, 32*1024)
-	_, err = io.CopyBuffer(io.MultiWriter(remoteFile, bar), localFile, buf)
-	if err != nil {
-		return fmt.Errorf("copy failed: %w", err)
-	}
+	uploader := NewUploader(sftpClient)
 
-	// if err := sftpClient.Chmod(remotePath, fileInfo.Mode()); err != nil {
-	// 	fmt.Printf("warning: cannot set permissions: %v\n", err)
-	// }
-
-	return nil
+	return uploader.UploadFile(localPath, remotePath, func(n int) {
+		bar.Add(n)
+	})
 }
 
-func uploadDir(sftpClient *sftp.Client, localDir, remoteDir string) error {
-	if err := sftpClient.MkdirAll(remoteDir); err != nil {
+func uploadDir(sftpClient *sftp.Client, localDir, remotePath string) error {
+	if err := sftpClient.MkdirAll(remotePath); err != nil {
 		return fmt.Errorf("cannot create remote directory: %w", err)
 	}
 
+	sem := make(chan struct{}, 4)
 	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		relPath, err := filepath.Rel(localDir, path)
-		if err != nil {
-			return err
-		}
-
-		remotePath := filepath.Join(remoteDir, relPath)
-		remotePath = filepath.ToSlash(remotePath)
-
 		if info.IsDir() {
 			return sftpClient.MkdirAll(remotePath)
 		}
 
-		return uploadFile(sftpClient, path, remotePath)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem }()
+			_ = uploadFile(sftpClient, path, remotePath)
+		}()
+
+		return nil
 	})
 }

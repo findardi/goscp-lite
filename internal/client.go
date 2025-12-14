@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -57,11 +58,28 @@ func (c *Client) Close() error {
 }
 
 func dialServer(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
-	ep, err := addDefaultPort(addr)
+	addr, err := addDefaultPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	return ssh.Dial("tcp", ep, cfg)
+	return func() (*ssh.Client, error) {
+		d := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
+		conn, err := d.Dial("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+		if err != nil {
+			return nil, err
+		}
+
+		return ssh.NewClient(sshConn, chans, reqs), nil
+	}()
 }
 
 func addDefaultPort(addr string) (string, error) {
@@ -113,6 +131,16 @@ func Initiate(user, host, keyPath string, port int) (string, *ssh.ClientConfig) 
 			fmt.Printf("✗ %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	sshCfg.Config = ssh.Config{
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes128-gcm@openssh.com",
+		},
+		MACs: []string{
+			"hmac-sha2-256",
+		},
 	}
 
 	return serverAddr, sshCfg
