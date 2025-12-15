@@ -3,8 +3,10 @@ package internal
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,14 +21,14 @@ const (
 
 type Uploader struct {
 	client     *sftp.Client
-	workes     int
+	workers    int
 	bufferSize int
 }
 
 func NewUploader(c *sftp.Client) Uploader {
 	return Uploader{
 		client:     c,
-		workes:     autoWorker(),
+		workers:    autoWorker(),
 		bufferSize: PACKET_SIZE,
 	}
 }
@@ -35,33 +37,60 @@ func autoWorker() int {
 	return 8
 }
 
-func (u *Uploader) UploadFile(localPath, remotePath string, progress func(int)) error {
+func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progress func(int)) error {
 	local, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer local.Close()
 
-	remote, err := u.client.Create(remotePath)
+	if offset > 0 {
+		_, err = local.Seek(offset, io.SeekStart)
+		if err != nil {
+			return fmt.Errorf("failed to seek local file: %w", err)
+		}
+	}
+
+	// Use OpenFile with O_RDWR|O_CREATE to allow random access and resuming.
+	// Only truncate if we are starting from the beginning (offset 0).
+	flags := os.O_RDWR | os.O_CREATE
+	if offset == 0 {
+		flags |= os.O_TRUNC
+	}
+
+	remote, err := u.client.OpenFile(remotePath, flags)
 	if err != nil {
 		return err
 	}
 	defer remote.Close()
 
 	type chunk struct {
-		data []byte
-		n    int
+		data   []byte
+		n      int
+		offset int64
 	}
 
-	ch := make(chan chunk, u.workes)
+	ch := make(chan chunk, u.workers)
 	wg := sync.WaitGroup{}
+	errChan := make(chan error, 1)
 
-	for i := 0; i < u.workes; i++ {
+	// Ensure workers are waited on and channel is closed upon return
+	defer wg.Wait()
+	defer close(ch)
+
+	for i := 0; i < u.workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for c := range ch {
-				_, _ = remote.Write(c.data[:c.n])
+				_, err := remote.WriteAt(c.data[:c.n], c.offset)
+				if err != nil {
+					select {
+					case errChan <- err:
+					default:
+					}
+					return
+				}
 				if progress != nil {
 					progress(c.n)
 				}
@@ -70,28 +99,47 @@ func (u *Uploader) UploadFile(localPath, remotePath string, progress func(int)) 
 	}
 
 	buf := make([]byte, u.bufferSize)
+	currentOffset := offset
+
 	for {
+		// Check for errors from workers
+		select {
+		case err := <-errChan:
+			return err
+		default:
+		}
+
 		n, err := local.Read(buf)
 		if n > 0 {
 			tmp := make([]byte, n)
 			copy(tmp, buf[:n])
-			ch <- chunk{
-				data: tmp,
-				n:    n,
+
+			select {
+			case ch <- chunk{
+				data:   tmp,
+				n:      n,
+				offset: currentOffset,
+			}:
+			case err := <-errChan:
+				return err
 			}
+			currentOffset += int64(n)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			close(ch)
-			wg.Wait()
 			return err
 		}
 	}
 
-	close(ch)
-	wg.Wait()
+	// Double check error channel after loop
+	select {
+	case err := <-errChan:
+		return err
+	default:
+	}
+
 	return nil
 }
 
@@ -117,7 +165,15 @@ func Upload(user, host string, port int, keypath, localPath, remotePath string) 
 	} else {
 		// file handle
 		remoteInfo, statErr := client.SFTP().Stat(remotePath)
-		if statErr == nil && remoteInfo.IsDir() {
+		isRemoteDir := statErr == nil && remoteInfo.IsDir()
+
+		if isRemoteDir || strings.HasSuffix(remotePath, "/") {
+			if !isRemoteDir {
+				if err := client.SFTP().MkdirAll(remotePath); err != nil {
+					fmt.Printf("✗ Cannot create remote directory: %v\n", err)
+					os.Exit(1)
+				}
+			}
 			remotePath = filepath.ToSlash(filepath.Join(remotePath, filepath.Base(localPath)))
 		}
 		err = uploadFile(client.SFTP(), localPath, remotePath)
@@ -142,11 +198,15 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 		return fmt.Errorf("cannot stat local file: %w", err)
 	}
 
-	remoteFile, err := sftpClient.Create(remotePath)
-	if err != nil {
-		return fmt.Errorf("cannot create remote file: %w", err)
+	var offset int64 = 0
+	remoteFileInfo, err := sftpClient.Stat(remotePath)
+	if err == nil {
+		// Remote file exists
+		if remoteFileInfo.Size() < fileInfo.Size() {
+			offset = remoteFileInfo.Size()
+			fmt.Printf("Resuming upload from %d bytes (%.2f%%)\n", offset, float64(offset)/float64(fileInfo.Size())*100)
+		}
 	}
-	defer remoteFile.Close()
 
 	bar := progressbar.NewOptions64(
 		fileInfo.Size(),
@@ -169,34 +229,78 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 		}),
 	)
 
+	if offset > 0 {
+		bar.Add64(offset)
+	}
+
 	uploader := NewUploader(sftpClient)
 
-	return uploader.UploadFile(localPath, remotePath, func(n int) {
+	return uploader.UploadFile(localPath, remotePath, offset, func(n int) {
 		bar.Add(n)
 	})
 }
 
-func uploadDir(sftpClient *sftp.Client, localDir, remotePath string) error {
-	if err := sftpClient.MkdirAll(remotePath); err != nil {
+func uploadDir(sftpClient *sftp.Client, localDir, remoteDir string) error {
+	localDir = filepath.Clean(localDir)
+
+	if err := sftpClient.MkdirAll(remoteDir); err != nil {
 		return fmt.Errorf("cannot create remote directory: %w", err)
 	}
 
 	sem := make(chan struct{}, 4)
-	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+	var wg sync.WaitGroup
+	var ferr error
+	var mu sync.Mutex
+
+	err := filepath.WalkDir(localDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
+		mu.Lock()
+		if ferr != nil {
+			mu.Unlock()
+			return filepath.SkipAll
+		}
+		mu.Unlock()
+
+		relPath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return err
+		}
+
+		remotePath := filepath.Join(remoteDir, relPath)
+		remotePath = filepath.ToSlash(remotePath)
+
+		if d.IsDir() {
 			return sftpClient.MkdirAll(remotePath)
 		}
 
+		wg.Add(1)
 		sem <- struct{}{}
-		go func() {
+		go func(src, dst string) {
+			defer wg.Done()
 			defer func() { <-sem }()
-			_ = uploadFile(sftpClient, path, remotePath)
-		}()
+
+			if err := uploadFile(sftpClient, src, dst); err != nil {
+				mu.Lock()
+				if ferr == nil {
+					ferr = err
+				}
+				mu.Unlock()
+			}
+		}(path, remotePath)
 
 		return nil
 	})
+
+	wg.Wait()
+
+	if err != nil {
+		return err
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	return ferr
 }
