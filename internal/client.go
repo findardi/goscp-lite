@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -28,7 +30,11 @@ func NewClient(serverAddr string, sshCfg *ssh.ClientConfig) (*Client, error) {
 	}
 
 	// create sftp session
-	sftpClient, err := sftp.NewClient(sshClient)
+	sftpClient, err := sftp.NewClient(
+		sshClient,
+		sftp.MaxPacket(32*1024),
+		sftp.MaxConcurrentRequestsPerFile(64),
+	)
 	if err != nil {
 		sshClient.Close()
 		return nil, fmt.Errorf("sftp session failed: %w", err)
@@ -52,11 +58,28 @@ func (c *Client) Close() error {
 }
 
 func dialServer(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
-	ep, err := addDefaultPort(addr)
+	addr, err := addDefaultPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	return ssh.Dial("tcp", ep, cfg)
+	return func() (*ssh.Client, error) {
+		d := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
+		conn, err := d.Dial("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+		if err != nil {
+			return nil, err
+		}
+
+		return ssh.NewClient(sshConn, chans, reqs), nil
+	}()
 }
 
 func addDefaultPort(addr string) (string, error) {
@@ -73,4 +96,52 @@ func addDefaultPort(addr string) (string, error) {
 	}
 
 	return addr, nil
+}
+
+func Initiate(user, host, keyPath string, port int) (string, *ssh.ClientConfig) {
+	if user == "" {
+		user = "root"
+	}
+
+	if port == 0 {
+		port = 22
+	}
+
+	serverAddr := fmt.Sprintf("%s:%d", host, port)
+
+	var (
+		sshCfg *ssh.ClientConfig
+		err    error
+	)
+
+	if keyPath != "" {
+		keyData, err := os.ReadFile(keyPath)
+		if err != nil {
+			fmt.Printf("✗ Failed to read key: %v\n", err)
+			os.Exit(1)
+		}
+		sshCfg, err = NewSSHCfgPrivateKey(user, keyData)
+		if err != nil {
+			fmt.Printf("✗ Failed to create SSH config: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		sshCfg, err = NewSSHCfgWithAllKeys(user)
+		if err != nil {
+			fmt.Printf("✗ %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	sshCfg.Config = ssh.Config{
+		Ciphers: []string{
+			"chacha20-poly1305@openssh.com",
+			"aes128-gcm@openssh.com",
+		},
+		MACs: []string{
+			"hmac-sha2-256",
+		},
+	}
+
+	return serverAddr, sshCfg
 }
