@@ -1,6 +1,8 @@
 package internal
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -51,8 +53,6 @@ func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progre
 		}
 	}
 
-	// Use OpenFile with O_RDWR|O_CREATE to allow random access and resuming.
-	// Only truncate if we are starting from the beginning (offset 0).
 	flags := os.O_RDWR | os.O_CREATE
 	if offset == 0 {
 		flags |= os.O_TRUNC
@@ -74,7 +74,6 @@ func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progre
 	wg := sync.WaitGroup{}
 	errChan := make(chan error, 1)
 
-	// Ensure workers are waited on and channel is closed upon return
 	defer wg.Wait()
 	defer close(ch)
 
@@ -102,7 +101,6 @@ func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progre
 	currentOffset := offset
 
 	for {
-		// Check for errors from workers
 		select {
 		case err := <-errChan:
 			return err
@@ -133,7 +131,6 @@ func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progre
 		}
 	}
 
-	// Double check error channel after loop
 	select {
 	case err := <-errChan:
 		return err
@@ -161,7 +158,7 @@ func Upload(user, host string, port int, keypath, localPath, remotePath string) 
 
 	if dataInfo.IsDir() {
 		// directory handle
-		err = uploadDir(client.SFTP(), localPath, remotePath)
+		err = uploadDir(client, localPath, remotePath)
 	} else {
 		// file handle
 		remoteInfo, statErr := client.SFTP().Stat(remotePath)
@@ -176,7 +173,7 @@ func Upload(user, host string, port int, keypath, localPath, remotePath string) 
 			}
 			remotePath = filepath.ToSlash(filepath.Join(remotePath, filepath.Base(localPath)))
 		}
-		err = uploadFile(client.SFTP(), localPath, remotePath)
+		err = uploadFile(client, localPath, remotePath)
 	}
 
 	if err != nil {
@@ -186,7 +183,10 @@ func Upload(user, host string, port int, keypath, localPath, remotePath string) 
 	fmt.Printf("✓ Upload successful\n")
 }
 
-func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
+func uploadFile(client *Client, localPath, remotePath string) error {
+	sftpClient := client.SFTP()
+	partPath := remotePath + ".part"
+
 	localFile, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("cannot open local file: %w", err)
@@ -199,9 +199,9 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 	}
 
 	var offset int64 = 0
-	remoteFileInfo, err := sftpClient.Stat(remotePath)
+	remoteFileInfo, err := sftpClient.Stat(partPath)
 	if err == nil {
-		// Remote file exists
+		// .part file exists
 		if remoteFileInfo.Size() < fileInfo.Size() {
 			offset = remoteFileInfo.Size()
 			fmt.Printf("Resuming upload from %d bytes (%.2f%%)\n", offset, float64(offset)/float64(fileInfo.Size())*100)
@@ -235,12 +235,69 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) error {
 
 	uploader := NewUploader(sftpClient)
 
-	return uploader.UploadFile(localPath, remotePath, offset, func(n int) {
+	// Upload to .part file
+	err = uploader.UploadFile(localPath, partPath, offset, func(n int) {
 		bar.Add(n)
 	})
+	if err != nil {
+		return err
+	}
+
+	// Rename .part to actual filename
+	err = sftpClient.Rename(partPath, remotePath)
+	if err != nil {
+		return fmt.Errorf("failed to rename part file: %w", err)
+	}
+
+	// Verify File
+	fmt.Printf("Verifying integrity...\n")
+	if err := verifyIntegrity(client, localPath, remotePath); err != nil {
+		return fmt.Errorf("integrity check failed: %w", err)
+	}
+	fmt.Printf("✓ Integrity check passed\n")
+
+	return nil
 }
 
-func uploadDir(sftpClient *sftp.Client, localDir, remoteDir string) error {
+func verifyIntegrity(client *Client, localPath, remotePath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	localSum := hex.EncodeToString(h.Sum(nil))
+
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create ssh session for verification: %w", err)
+	}
+	defer session.Close()
+
+	output, err := session.CombinedOutput(fmt.Sprintf("md5sum '%s'", remotePath))
+	if err != nil {
+		return fmt.Errorf("remote md5sum command failed: %w, output: %s", err, string(output))
+	}
+
+	fields := strings.Fields(string(output))
+	if len(fields) < 1 {
+		return fmt.Errorf("unexpected output from md5sum: %s", string(output))
+	}
+	remoteSum := fields[0]
+
+	if localSum != remoteSum {
+		return fmt.Errorf("checksum mismatch: local=%s, remote=%s", localSum, remoteSum)
+	}
+
+	return nil
+}
+
+func uploadDir(client *Client, localDir, remoteDir string) error {
+	sftpClient := client.SFTP()
 	localDir = filepath.Clean(localDir)
 
 	if err := sftpClient.MkdirAll(remoteDir); err != nil {
@@ -282,7 +339,7 @@ func uploadDir(sftpClient *sftp.Client, localDir, remoteDir string) error {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := uploadFile(sftpClient, src, dst); err != nil {
+			if err := uploadFile(client, src, dst); err != nil {
 				mu.Lock()
 				if ferr == nil {
 					ferr = err
