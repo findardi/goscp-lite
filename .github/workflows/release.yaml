@@ -1,0 +1,28 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: build binary
+        run: |
+          mkdir -p dist
+          go build -ldflags="-s -w" -o dist/goscp .
+
+      - name: create github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/app
+          generate_release_notes: true
