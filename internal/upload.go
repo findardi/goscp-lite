@@ -210,8 +210,8 @@ func uploadFile(client *Client, localPath, remotePath string) error {
 
 	bar := progressbar.NewOptions64(
 		fileInfo.Size(),
-		progressbar.OptionSetDescription(filepath.Base(localPath)),
-		progressbar.OptionSetWidth(30),
+		progressbar.OptionSetDescription(truncateString(filepath.Base(localPath), 15)),
+		progressbar.OptionSetWidth(20),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionShowCount(),
 		progressbar.OptionClearOnFinish(),
@@ -243,6 +243,8 @@ func uploadFile(client *Client, localPath, remotePath string) error {
 		return err
 	}
 
+	// delete if exists
+	_ = sftpClient.Remove(remotePath)
 	// Rename .part to actual filename
 	err = sftpClient.Rename(partPath, remotePath)
 	if err != nil {
@@ -360,4 +362,11 @@ func uploadDir(client *Client, localDir, remoteDir string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	return ferr
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
