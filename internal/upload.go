@@ -1,8 +1,6 @@
 package internal
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -10,36 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
-
-	"github.com/pkg/sftp"
-	"github.com/schollz/progressbar/v3"
 )
 
-const (
-	MAX_FILE_SIZE = 100 * 1024 * 1024
-	PACKET_SIZE   = 32 * 1024
-)
-
-type Uploader struct {
-	client     *sftp.Client
-	workers    int
-	bufferSize int
-}
-
-func NewUploader(c *sftp.Client) Uploader {
-	return Uploader{
-		client:     c,
-		workers:    autoWorker(),
-		bufferSize: PACKET_SIZE,
-	}
-}
-
-func autoWorker() int {
-	return 8
-}
-
-func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progress func(int)) error {
+func (u *transfer) UploadFile(localPath, remotePath string, offset int64, progress func(int)) error {
 	local, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -64,80 +35,7 @@ func (u *Uploader) UploadFile(localPath, remotePath string, offset int64, progre
 	}
 	defer remote.Close()
 
-	type chunk struct {
-		data   []byte
-		n      int
-		offset int64
-	}
-
-	ch := make(chan chunk, u.workers)
-	wg := sync.WaitGroup{}
-	errChan := make(chan error, 1)
-
-	defer wg.Wait()
-	defer close(ch)
-
-	for i := 0; i < u.workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for c := range ch {
-				_, err := remote.WriteAt(c.data[:c.n], c.offset)
-				if err != nil {
-					select {
-					case errChan <- err:
-					default:
-					}
-					return
-				}
-				if progress != nil {
-					progress(c.n)
-				}
-			}
-		}()
-	}
-
-	buf := make([]byte, u.bufferSize)
-	currentOffset := offset
-
-	for {
-		select {
-		case err := <-errChan:
-			return err
-		default:
-		}
-
-		n, err := local.Read(buf)
-		if n > 0 {
-			tmp := make([]byte, n)
-			copy(tmp, buf[:n])
-
-			select {
-			case ch <- chunk{
-				data:   tmp,
-				n:      n,
-				offset: currentOffset,
-			}:
-			case err := <-errChan:
-				return err
-			}
-			currentOffset += int64(n)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	select {
-	case err := <-errChan:
-		return err
-	default:
-	}
-
-	return nil
+	return u.Chunker(local, remote, offset, progress)
 }
 
 func Upload(user, host string, port int, keypath, localPath, remotePath string) {
@@ -208,34 +106,12 @@ func uploadFile(client *Client, localPath, remotePath string) error {
 		}
 	}
 
-	bar := progressbar.NewOptions64(
-		fileInfo.Size(),
-		progressbar.OptionSetDescription(truncateString(filepath.Base(localPath), 15)),
-		progressbar.OptionSetWidth(20),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionThrottle(100*time.Millisecond),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "=",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Println()
-		}),
-	)
-
+	bar := progressBar(fileInfo, localPath)
 	if offset > 0 {
 		bar.Add64(offset)
 	}
 
-	uploader := NewUploader(sftpClient)
-
-	// Upload to .part file
+	uploader := NewTransfer(sftpClient)
 	err = uploader.UploadFile(localPath, partPath, offset, func(n int) {
 		bar.Add(n)
 	})
@@ -257,43 +133,6 @@ func uploadFile(client *Client, localPath, remotePath string) error {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
 	fmt.Printf("✓ Integrity check passed\n")
-
-	return nil
-}
-
-func verifyIntegrity(client *Client, localPath, remotePath string) error {
-	f, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	h := md5.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	localSum := hex.EncodeToString(h.Sum(nil))
-
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create ssh session for verification: %w", err)
-	}
-	defer session.Close()
-
-	output, err := session.CombinedOutput(fmt.Sprintf("md5sum '%s'", remotePath))
-	if err != nil {
-		return fmt.Errorf("remote md5sum command failed: %w, output: %s", err, string(output))
-	}
-
-	fields := strings.Fields(string(output))
-	if len(fields) < 1 {
-		return fmt.Errorf("unexpected output from md5sum: %s", string(output))
-	}
-	remoteSum := fields[0]
-
-	if localSum != remoteSum {
-		return fmt.Errorf("checksum mismatch: local=%s, remote=%s", localSum, remoteSum)
-	}
 
 	return nil
 }
@@ -362,11 +201,4 @@ func uploadDir(client *Client, localDir, remoteDir string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	return ferr
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

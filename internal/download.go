@@ -1,35 +1,17 @@
 package internal
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pkg/sftp"
-	"github.com/schollz/progressbar/v3"
 )
 
-type Downloader struct {
-	client     *sftp.Client
-	workers    int
-	bufferSize int
-}
-
-func NewDownloader(c *sftp.Client) Downloader {
-	return Downloader{
-		client:     c,
-		workers:    autoWorker(),
-		bufferSize: PACKET_SIZE,
-	}
-}
-
-func (d *Downloader) DownloadFile(localPath, remotePath string, offset int64, progress func(int)) error {
+func (d *transfer) DownloadFile(localPath, remotePath string, offset int64, progress func(int)) error {
 	remote, err := d.client.Open(remotePath)
 	if err != nil {
 		return err
@@ -54,82 +36,7 @@ func (d *Downloader) DownloadFile(localPath, remotePath string, offset int64, pr
 	}
 	defer local.Close()
 
-	type chunk struct {
-		data   []byte
-		n      int
-		offset int64
-	}
-
-	ch := make(chan chunk, d.workers)
-	wg := sync.WaitGroup{}
-	errChan := make(chan error, 1)
-
-	for i := 0; i < d.workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for c := range ch {
-				_, err := local.WriteAt(c.data[:c.n], c.offset)
-				if err != nil {
-					select {
-					case errChan <- err:
-					default:
-					}
-					return
-				}
-
-				if progress != nil {
-					progress(c.n)
-				}
-			}
-		}()
-	}
-	defer wg.Wait()
-	defer close(ch)
-
-	buf := make([]byte, d.bufferSize)
-	currentOffset := offset
-
-	for {
-		select {
-		case err := <-errChan:
-			return err
-		default:
-		}
-
-		n, err := remote.Read(buf)
-		if n > 0 {
-			tmp := make([]byte, n)
-			copy(tmp, buf[:n])
-
-			select {
-			case ch <- chunk{
-				data:   tmp,
-				n:      n,
-				offset: currentOffset,
-			}:
-			case err := <-errChan:
-				return err
-			}
-			currentOffset += int64(n)
-		}
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return err
-		}
-	}
-
-	select {
-	case err := <-errChan:
-		return err
-	default:
-	}
-
-	return nil
+	return d.Chunker(remote, local, offset, progress)
 }
 
 func Download(user, host string, port int, keypath, localpath, remotepath string) {
@@ -191,32 +98,12 @@ func downloadFile(client *Client, remotePath, localPath string) error {
 		}
 	}
 
-	bar := progressbar.NewOptions64(
-		remoteInfo.Size(),
-		progressbar.OptionSetDescription(truncateString(filepath.Base(remotePath), 15)),
-		progressbar.OptionSetWidth(20),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionThrottle(100*time.Millisecond),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "=",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Println()
-		}),
-	)
-
+	bar := progressBar(remoteInfo, remotePath)
 	if offset > 0 {
 		bar.Add64(offset)
 	}
 
-	downloader := NewDownloader(sftpClient)
+	downloader := NewTransfer(sftpClient)
 	err = downloader.DownloadFile(partPath, remotePath, offset, func(n int) {
 		bar.Add(n)
 	})
@@ -233,44 +120,10 @@ func downloadFile(client *Client, remotePath, localPath string) error {
 	}
 
 	fmt.Printf("Verifying integrity...\n")
-	if err := verifyDownloadIntegrity(client, localPath, remotePath); err != nil {
+	if err := verifyIntegrity(client, localPath, remotePath); err != nil {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
 	fmt.Printf("✓ Integrity check passed\n")
-	return nil
-}
-
-func verifyDownloadIntegrity(client *Client, localPath, remotePath string) error {
-	f, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	h := md5.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	localsum := hex.EncodeToString(h.Sum(nil))
-
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create ssh session: %w", err)
-	}
-	defer session.Close()
-
-	output, err := session.CombinedOutput(fmt.Sprintf("md5sum '%s'", remotePath))
-	if err != nil {
-		return fmt.Errorf("remote md5sum failed: %w, output: %s", err, string(output))
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) < 1 {
-		return fmt.Errorf("unexpected md5sum output: %s", string(output))
-	}
-	remoteSum := fields[0]
-	if localsum != remoteSum {
-		return fmt.Errorf("checksum mismatch: local=%s, remote=%s", localsum, remoteSum)
-	}
 	return nil
 }
 
