@@ -13,7 +13,7 @@ var uploadCmd = &cobra.Command{
 	Example: "  goscp upload .file.txt /remote/path/ -H example.com -p 123",
 	Args:    cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		internal.Upload(user, host, port, keypath, args[0], args[1])
+		internal.Upload(user, host, port, keypath, args[0], args[1], retry)
 	},
 }
 

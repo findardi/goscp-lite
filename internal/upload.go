@@ -38,46 +38,48 @@ func (u *transfer) UploadFile(localPath, remotePath string, offset int64, progre
 	return u.Chunker(local, remote, offset, progress)
 }
 
-func Upload(user, host string, port int, keypath, localPath, remotePath string) {
+func Upload(user, host string, port int, keypath, localPath, remotePath string, maxRetry int) {
 	serverAddr, sshCfg := Initiate(user, host, keypath, port)
+	retryCfg := DefaultRetry(maxRetry)
 
-	client, err := NewClient(serverAddr, sshCfg)
-	if err != nil {
-		fmt.Printf("✗ Connection failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer client.Close()
+	err := WithRetry(retryCfg, func() error {
+		client, err := NewClient(serverAddr, sshCfg)
+		if err != nil {
+			fmt.Printf("✗ Connection failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer client.Close()
 
-	dataInfo, err := os.Stat(localPath)
-	if err != nil {
-		fmt.Printf("✗ Cannot access local path: %v\n", err)
-		os.Exit(1)
-	}
+		dataInfo, err := os.Stat(localPath)
+		if err != nil {
+			fmt.Printf("✗ Cannot access local path: %v\n", err)
+			os.Exit(1)
+		}
 
-	if dataInfo.IsDir() {
-		// directory handle
-		err = uploadDir(client, localPath, remotePath)
-	} else {
+		if dataInfo.IsDir() {
+			// directory handle
+			return uploadDir(client, localPath, remotePath)
+		}
+
 		// file handle
 		remoteInfo, statErr := client.SFTP().Stat(remotePath)
 		isRemoteDir := statErr == nil && remoteInfo.IsDir()
-
 		if isRemoteDir || strings.HasSuffix(remotePath, "/") {
 			if !isRemoteDir {
 				if err := client.SFTP().MkdirAll(remotePath); err != nil {
-					fmt.Printf("✗ Cannot create remote directory: %v\n", err)
-					os.Exit(1)
+					return fmt.Errorf("cannot create remote directory: %w", err)
 				}
 			}
 			remotePath = filepath.ToSlash(filepath.Join(remotePath, filepath.Base(localPath)))
 		}
-		err = uploadFile(client, localPath, remotePath)
-	}
+		return uploadFile(client, localPath, remotePath)
+	})
 
 	if err != nil {
 		fmt.Printf("✗ Upload failed: %v\n", err)
 		os.Exit(1)
 	}
+
 	fmt.Printf("✓ Upload successful\n")
 }
 
@@ -133,7 +135,6 @@ func uploadFile(client *Client, localPath, remotePath string) error {
 		return fmt.Errorf("integrity check failed: %w", err)
 	}
 	fmt.Printf("✓ Integrity check passed\n")
-
 	return nil
 }
 
