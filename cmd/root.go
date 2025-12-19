@@ -12,6 +12,7 @@ var (
 	keypath string
 	host    string
 	port    int
+	retry   int
 )
 
 var rootCmd = &cobra.Command{
@@ -26,4 +27,5 @@ func Execute() {
 		fmt.Fprintf(os.Stderr, "Woops, An error while executing goscp '%s'\n", err)
 		os.Exit(1)
 	}
+	rootCmd.PersistentFlags().IntVarP(&retry, "retry", "r", 3, "Max retry attempts on failure")
 }
