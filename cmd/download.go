@@ -13,7 +13,7 @@ var downloadCmd = &cobra.Command{
 	Example: "  goscp download /remote/file.txt ./local/path/ -H example.com -p 123",
 	Args:    cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		internal.Download(user, host, port, keypath, args[1], args[0])
+		internal.Download(user, host, port, keypath, args[1], args[0], retry)
 	},
 }
 

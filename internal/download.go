@@ -39,24 +39,27 @@ func (d *transfer) DownloadFile(localPath, remotePath string, offset int64, prog
 	return d.Chunker(remote, local, offset, progress)
 }
 
-func Download(user, host string, port int, keypath, localpath, remotepath string) {
+func Download(user, host string, port int, keypath, localpath, remotepath string, maxRetry int) {
 	serverAddr, sshCfg := Initiate(user, host, keypath, port)
-	client, err := NewClient(serverAddr, sshCfg)
-	if err != nil {
-		fmt.Printf("✗ Connection failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer client.Close()
+	retryCfg := DefaultRetry(maxRetry)
 
-	dataInfo, err := client.SFTP().Stat(remotepath)
-	if err != nil {
-		fmt.Printf("✗ Cannot access remote path: %v\n", err)
-		os.Exit(1)
-	}
+	err := WithRetry(retryCfg, func() error {
+		client, err := NewClient(serverAddr, sshCfg)
+		if err != nil {
+			fmt.Printf("✗ Connection failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer client.Close()
 
-	if dataInfo.IsDir() {
-		err = downloadDir(client, remotepath, localpath)
-	} else {
+		dataInfo, err := client.SFTP().Stat(remotepath)
+		if err != nil {
+			fmt.Printf("✗ Cannot access remote path: %v\n", err)
+			os.Exit(1)
+		}
+
+		if dataInfo.IsDir() {
+			return downloadDir(client, remotepath, localpath)
+		}
 		localInfo, statErr := os.Stat(localpath)
 		isLocalDir := statErr == nil && localInfo.IsDir()
 
@@ -69,8 +72,8 @@ func Download(user, host string, port int, keypath, localpath, remotepath string
 			}
 			localpath = filepath.ToSlash(filepath.Join(localpath, filepath.Base(remotepath)))
 		}
-		err = downloadFile(client, remotepath, localpath)
-	}
+		return downloadFile(client, remotepath, localpath)
+	})
 
 	if err != nil {
 		fmt.Printf("✗ Download failed: %v\n", err)

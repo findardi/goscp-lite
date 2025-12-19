@@ -12,6 +12,7 @@ var (
 	keypath string
 	host    string
 	port    int
+	retry   int
 )
 
 var rootCmd = &cobra.Command{
@@ -19,6 +20,10 @@ var rootCmd = &cobra.Command{
 	Short: "A lightweight SCP/SFTP CLI tool",
 	Long:  "goscp is a lightweight command-line tool for secure file transfers\nusing SFTP protocols, powered by Go with SSH key authentication.",
 	Run:   func(cmd *cobra.Command, args []string) {},
+}
+
+func init() {
+	rootCmd.PersistentFlags().IntVarP(&retry, "retry", "r", 3, "Max retry attempts on failure")
 }
 
 func Execute() {
