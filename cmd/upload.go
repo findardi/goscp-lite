@@ -19,11 +19,4 @@ var uploadCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(uploadCmd)
-
-	uploadCmd.Flags().StringVarP(&host, "host", "H", "", "host server")
-	uploadCmd.Flags().IntVarP(&port, "port", "p", 22, "port server")
-	uploadCmd.Flags().StringVarP(&user, "user", "u", "", "SSH username (default:root)")
-	uploadCmd.Flags().StringVarP(&keypath, "key", "k", "", "Path to private key (default:auto-detect)")
-
-	uploadCmd.MarkFlagRequired("host")
 }
