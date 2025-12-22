@@ -24,6 +24,13 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().IntVarP(&retry, "retry", "r", 3, "Max retry attempts on failure")
+
+	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", "", "host server")
+	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 22, "port server")
+	rootCmd.PersistentFlags().StringVarP(&user, "user", "U", "", "SSH username (default:root)")
+	rootCmd.PersistentFlags().StringVarP(&keypath, "key", "k", "", "Path to private key (default:auto-detect)")
+
+	rootCmd.MarkFlagRequired("host")
 }
 
 func Execute() {

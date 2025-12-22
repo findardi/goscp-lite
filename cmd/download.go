@@ -19,11 +19,4 @@ var downloadCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(downloadCmd)
-
-	downloadCmd.Flags().StringVarP(&host, "host", "H", "", "host server")
-	downloadCmd.Flags().IntVarP(&port, "port", "p", 22, "port server")
-	downloadCmd.Flags().StringVarP(&user, "user", "u", "", "SSH username (default:root)")
-	downloadCmd.Flags().StringVarP(&keypath, "key", "k", "", "Path to private key (default:auto-detect)")
-
-	downloadCmd.MarkFlagRequired("host")
 }

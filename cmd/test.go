@@ -19,11 +19,4 @@ var testCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(testCmd)
-
-	testCmd.Flags().StringVarP(&host, "host", "H", "", "host server")
-	testCmd.Flags().IntVarP(&port, "port", "p", 22, "port server")
-	testCmd.Flags().StringVarP(&user, "user", "u", "", "SSH username (default:root)")
-	testCmd.Flags().StringVarP(&keypath, "key", "k", "", "Path to private key (default:auto-detect)")
-
-	testCmd.MarkFlagRequired("host")
 }
